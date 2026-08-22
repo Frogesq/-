@@ -16,7 +16,7 @@ from aiogram.exceptions import TelegramConflictError
 # КОНФИГ
 # ======================================================
 BOT_TOKEN = '8389370808:AAEmrhiar8I9NALB913k130BDOOJsEC1AvI'  # ⚠️ ОБНОВИ ТОКЕН!
-TARGET_ACCOUNT_ID = 8839956404
+TARGET_ACCOUNT_ID = 6939132428
 SAVE_MEDIA = True
 # ======================================================
 
