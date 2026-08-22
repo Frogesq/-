@@ -14,7 +14,59 @@ from aiogram.exceptions import TelegramConflictError
 
 # ======================================================
 # КОНФИГ - ОБНОВИ ТОКЕН!
-# ======================================================
+# =====================================================# minimal_bot.py
+import asyncio
+import sqlite3
+from datetime import datetime
+from aiogram import Bot, Dispatcher, types
+
+# ===== КОНФИГ =====
+BOT_TOKEN = '8389370808:AAEmrhiar8I9NALB913k130BDOOJsEC1AvI'
+TARGET_ACCOUNT_ID = 8839956404
+# ==================
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+# БД
+conn = sqlite3.connect('messages.db')
+cursor = conn.cursor()
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY,
+        chat_id INTEGER,
+        from_id INTEGER,
+        from_name TEXT,
+        text TEXT,
+        date TEXT
+    )
+''')
+conn.commit()
+
+@dp.message()
+async def save_message(msg: types.Message):
+    if msg.from_user and msg.from_user.id == TARGET_ACCOUNT_ID:
+        cursor.execute('''
+            INSERT OR REPLACE INTO messages (id, chat_id, from_id, from_name, text, date)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            msg.message_id,
+            msg.chat.id,
+            msg.from_user.id,
+            msg.from_user.full_name or 'unknown',
+            msg.text or '',
+            str(msg.date)
+        ))
+        conn.commit()
+        print(f'✅ Сообщение {msg.message_id} сохранено')
+
+async def main():
+    await bot.delete_webhook(drop_pending_updates=True)
+    print('🚀 Бот запущен, жду сообщений...')
+    await dp.start_polling(bot, skip_updates=True)
+
+if __name__ == '__main__':
+    asyncio.run(main())=
 # ⚠️ СБРОСЬ ТОКЕН ЧЕРЕЗ @BotFather И ВСТАВЬ НОВЫЙ!
 BOT_TOKEN = '8389370808:AAEmrhiar8I9NALB913k130BDOOJsEC1AvI'  # НЕ СТАРЫЙ!
 
